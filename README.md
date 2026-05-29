@@ -268,10 +268,10 @@ This repo builds on [fla-org/flash-linear-attention] and depends on it for hardw
 
 ```
 
-@article{afzalbick2025raven,
+@article{afzalbick2026raven,
   title={Raven: High-Recall Sequence Modeling with Sparse Memory Routing},
   author={Arshia Afzal, Aviv Bick, Eric P. Xing, Volkan Cevher, Albert Gu},
-  year={2025},
+  year={2026},
   publisher={MDPI}
 }
 
