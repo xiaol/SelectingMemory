@@ -73,6 +73,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rwkv-chunk-len", type=int, default=16)
     parser.add_argument("--routed-rwkv-route-floor", type=float, default=0.1)
     parser.add_argument("--low-rank-slot-rwkv-rank", type=int, default=8)
+    parser.add_argument("--low-rank-slot-rwkv-backend", default="auto", choices=["auto", "triton", "torch"])
     parser.add_argument("--lt2-wrapper-root", type=Path, default=None, help="Repo root containing apps/LT2/rwkv7_cuda.py.")
     parser.add_argument("--lt2-cuda-dir", type=Path, default=None, help="Directory containing LT2 RWKV-7 CUDA sources.")
     parser.add_argument("--json-out", type=Path, default=None)
@@ -118,6 +119,7 @@ def _build_config(args: argparse.Namespace, mixer: str):
         rwkv7_chunk_len=args.rwkv_chunk_len,
         routed_rwkv7_route_floor=args.routed_rwkv_route_floor,
         low_rank_slot_rwkv7_rank=args.low_rank_slot_rwkv_rank,
+        low_rank_slot_rwkv7_backend=args.low_rank_slot_rwkv_backend,
     )
 
 

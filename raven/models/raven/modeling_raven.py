@@ -75,6 +75,7 @@ class RavenBlock(nn.Module):
                 add_gumbel_noise=config.add_gumbel_noise,
                 route_floor=config.routed_rwkv7_route_floor,
                 low_rank=config.low_rank_slot_rwkv7_rank,
+                low_rank_backend=config.low_rank_slot_rwkv7_backend,
             )
         else:
             self.attn = RavenAttention(

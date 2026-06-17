@@ -9,6 +9,66 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
+try:
+    import triton
+    import triton.language as tl
+except ModuleNotFoundError:
+    triton = None
+    tl = None
+
+
+if triton is not None:
+    @triton.jit
+    def _low_rank_slot_rwkv7_fwd_kernel(
+        r_ptr,
+        w_ptr,
+        k_ptr,
+        v_ptr,
+        a_ptr,
+        b_ptr,
+        slot_ptr,
+        out_ptr,
+        T: tl.constexpr,
+        C: tl.constexpr,
+        H: tl.constexpr,
+        S: tl.constexpr,
+        D: tl.constexpr,
+        RANK: tl.constexpr,
+        GROUP: tl.constexpr,
+    ):
+        pid_b = tl.program_id(0)
+        pid_h = tl.program_id(1)
+        pid_s = tl.program_id(2)
+
+        offs_d = tl.arange(0, D)
+        offs_r = tl.arange(0, RANK)
+        offs_g = tl.arange(0, GROUP)
+        state = tl.zeros((RANK, D), dtype=tl.float32)
+
+        for t in range(0, T):
+            token_base = (pid_b * T + t) * C + pid_h * D
+            slot_offset = ((pid_b * T + t) * H + pid_h) * S + pid_s
+
+            rt = tl.load(r_ptr + token_base + offs_d).to(tl.float32)
+            wt = tl.load(w_ptr + token_base + offs_d).to(tl.float32)
+            kt = tl.load(k_ptr + token_base + offs_d).to(tl.float32)
+            vt = tl.load(v_ptr + token_base + offs_d).to(tl.float32)
+            at = tl.load(a_ptr + token_base + offs_d).to(tl.float32)
+            bt = tl.load(b_ptr + token_base + offs_d).to(tl.float32)
+            zt = tl.load(slot_ptr + slot_offset).to(tl.float32)
+
+            grouped = offs_r[:, None] * GROUP + offs_g[None, :]
+            k_rank = tl.sum(tl.load(k_ptr + token_base + grouped).to(tl.float32), axis=1) / GROUP
+            r_rank = tl.sum(tl.load(r_ptr + token_base + grouped).to(tl.float32), axis=1) / GROUP
+
+            decay = tl.exp(-tl.exp(wt))
+            sa = tl.sum(state * at[None, :], axis=1)
+            update = k_rank[:, None] * vt[None, :] + sa[:, None] * bt[None, :]
+            state = state * (1.0 - zt + zt * decay[None, :]) + zt * update
+
+            yt = tl.sum(state * r_rank[:, None], axis=0) * zt
+            tl.atomic_add(out_ptr + token_base + offs_d, yt, sem="relaxed")
+
 
 def _ortho_init_(x: Tensor, scale: float = 1.0) -> Tensor:
     with torch.no_grad():
@@ -157,6 +217,52 @@ def rwkv7_low_rank_slot_recurrence_torch(
         yt = (slot_y * z.unsqueeze(-1)).sum(dim=2)
         out.append(yt.to(dtype))
     return torch.stack(out, dim=1).reshape(B, T, C)
+
+
+def rwkv7_low_rank_slot_recurrence_triton(
+    r: Tensor,
+    w: Tensor,
+    k: Tensor,
+    v: Tensor,
+    a: Tensor,
+    b: Tensor,
+    slot_weights: Tensor,
+    head_size: int,
+    rank: int,
+) -> Tensor:
+    if triton is None:
+        raise RuntimeError("Triton is not installed")
+    if not r.is_cuda:
+        raise RuntimeError("Triton low-rank slot RWKV requires CUDA tensors")
+    if r.dtype != torch.bfloat16:
+        raise RuntimeError("Triton low-rank slot RWKV currently requires bfloat16 tensors")
+    if head_size % rank != 0:
+        raise ValueError(f"head_size ({head_size}) must be divisible by rank ({rank})")
+
+    B, T, C = r.shape
+    H = C // head_size
+    S = slot_weights.shape[-1]
+    group = head_size // rank
+    out = torch.zeros_like(r)
+    _low_rank_slot_rwkv7_fwd_kernel[(B, H, S)](
+        r.contiguous(),
+        w.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        a.contiguous(),
+        b.contiguous(),
+        slot_weights.contiguous(),
+        out,
+        T,
+        C,
+        H,
+        S,
+        head_size,
+        rank,
+        group,
+        num_warps=4,
+    )
+    return out
 
 
 @dataclass
@@ -709,6 +815,7 @@ class LowRankSlotRWKV7Mixer(SlotRWKV7Mixer):
         self,
         *args,
         low_rank: int = 8,
+        low_rank_backend: str = "auto",
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -716,7 +823,17 @@ class LowRankSlotRWKV7Mixer(SlotRWKV7Mixer):
             raise ValueError("low_rank must be positive")
         if self.head_size % low_rank != 0:
             raise ValueError(f"head_size ({self.head_size}) must be divisible by low_rank ({low_rank})")
+        if low_rank_backend not in {"auto", "triton", "torch"}:
+            raise ValueError("low_rank_backend must be 'auto', 'triton', or 'torch'")
         self.low_rank = low_rank
+        self.low_rank_backend = low_rank_backend
+
+    def _should_use_triton(self, r: Tensor) -> bool:
+        if self.low_rank_backend == "torch":
+            return False
+        if self.low_rank_backend == "triton":
+            return True
+        return not torch.is_grad_enabled() and r.is_cuda and r.dtype == torch.bfloat16 and triton is not None
 
     def forward(
         self,
@@ -750,17 +867,30 @@ class LowRankSlotRWKV7Mixer(SlotRWKV7Mixer):
             v_first=rwkv7_v_first,
             reset_v_first=reset_rwkv7_v_first or rwkv7_v_first is None,
         )
-        y = rwkv7_low_rank_slot_recurrence_torch(
-            r,
-            w,
-            k,
-            v,
-            a,
-            b,
-            slot_weights,
-            self.head_size,
-            self.low_rank,
-        )
+        if self._should_use_triton(r):
+            y = rwkv7_low_rank_slot_recurrence_triton(
+                r,
+                w,
+                k,
+                v,
+                a,
+                b,
+                slot_weights,
+                self.head_size,
+                self.low_rank,
+            )
+        else:
+            y = rwkv7_low_rank_slot_recurrence_torch(
+                r,
+                w,
+                k,
+                v,
+                a,
+                b,
+                slot_weights,
+                self.head_size,
+                self.low_rank,
+            )
         out = self.time_mix._finish_torch(y, r, k, v, g)
 
         if mask is not None:
