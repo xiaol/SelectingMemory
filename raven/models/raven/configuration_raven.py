@@ -56,6 +56,7 @@ class RavenConfig(PretrainedConfig):
         rwkv7_chunk_len: int = 16,
         rwkv7_enable_v_first_mix: bool = True,
         routed_rwkv7_route_floor: float = 0.1,
+        low_rank_slot_rwkv7_rank: int = 8,
         vocab_size: int = 32000,
         **kwargs
     ):
@@ -99,10 +100,13 @@ class RavenConfig(PretrainedConfig):
         self.rwkv7_chunk_len = rwkv7_chunk_len
         self.rwkv7_enable_v_first_mix = rwkv7_enable_v_first_mix
         self.routed_rwkv7_route_floor = routed_rwkv7_route_floor
+        self.low_rank_slot_rwkv7_rank = low_rank_slot_rwkv7_rank
         self.vocab_size = vocab_size
 
-        if sequence_mixer not in {"raven", "rwkv7", "routed_rwkv7", "slot_rwkv7"}:
-            raise ValueError("sequence_mixer must be 'raven', 'rwkv7', 'routed_rwkv7', or 'slot_rwkv7'")
+        if sequence_mixer not in {"raven", "rwkv7", "routed_rwkv7", "slot_rwkv7", "low_rank_slot_rwkv7"}:
+            raise ValueError(
+                "sequence_mixer must be 'raven', 'rwkv7', 'routed_rwkv7', 'slot_rwkv7', or 'low_rank_slot_rwkv7'"
+            )
 
         if attn is not None:
             if not isinstance(attn, Dict):

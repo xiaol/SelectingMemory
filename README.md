@@ -215,7 +215,7 @@ Raven can also replace the default routing-memory layer with the original RWKV-7
 config = RavenConfig(
     hidden_size=1024,
     num_hidden_layers=24,
-    sequence_mixer="rwkv7",  # or "routed_rwkv7" / "slot_rwkv7"
+    sequence_mixer="rwkv7",  # or "routed_rwkv7" / "slot_rwkv7" / "low_rank_slot_rwkv7"
     rwkv7_head_size=64,
     rwkv7_backend="cuda",
     rwkv7_chunk_len=16,
@@ -233,8 +233,11 @@ RWKV mixer options:
 | `"rwkv7"` | Dense RWKV-7 state, no router | LT2 CUDA when available |
 | `"routed_rwkv7"` | Raven-style top-k router mapped to per-head channel groups | LT2 CUDA when available |
 | `"slot_rwkv7"` | Explicit per-head recurrent slot states, closest to Raven memory slots | PyTorch CUDA recurrence |
+| `"low_rank_slot_rwkv7"` | Explicit routed slots with low-rank per-slot state | PyTorch CUDA recurrence |
 
 Use `sequence_mixer="slot_rwkv7"` when you want RWKV to have Raven-level routed memory slots. It creates `num_slots` independent RWKV state matrices per head and applies the router inside the recurrent update. This is semantically closer to Raven, but slower until a dedicated slot-aware CUDA kernel is written.
+
+Use `sequence_mixer="low_rank_slot_rwkv7"` to keep explicit routed slots but reduce each slot state from `head_dim x head_dim` to `rank x head_dim`; configure the rank with `low_rank_slot_rwkv7_rank`.
 
 To compare Raven vs. RWKV-7 with the same model shape:
 

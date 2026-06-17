@@ -17,7 +17,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from raven.layers.raven import RavenAttention
-from raven.layers.rwkv7 import RWKV7Mixer, RoutedRWKV7Mixer, SlotRWKV7Mixer
+from raven.layers.rwkv7 import LowRankSlotRWKV7Mixer, RWKV7Mixer, RoutedRWKV7Mixer, SlotRWKV7Mixer
 from raven.models.raven.configuration_raven import RavenConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
@@ -51,11 +51,12 @@ class RavenBlock(nn.Module):
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx
             )
-        elif config.sequence_mixer in {"rwkv7", "routed_rwkv7", "slot_rwkv7"}:
+        elif config.sequence_mixer in {"rwkv7", "routed_rwkv7", "slot_rwkv7", "low_rank_slot_rwkv7"}:
             mixer_cls = {
                 "rwkv7": RWKV7Mixer,
                 "routed_rwkv7": RoutedRWKV7Mixer,
                 "slot_rwkv7": SlotRWKV7Mixer,
+                "low_rank_slot_rwkv7": LowRankSlotRWKV7Mixer,
             }[config.sequence_mixer]
             self.attn = mixer_cls(
                 hidden_size=config.hidden_size,
@@ -73,6 +74,7 @@ class RavenBlock(nn.Module):
                 router_score=config.router_score,
                 add_gumbel_noise=config.add_gumbel_noise,
                 route_floor=config.routed_rwkv7_route_floor,
+                low_rank=config.low_rank_slot_rwkv7_rank,
             )
         else:
             self.attn = RavenAttention(

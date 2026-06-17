@@ -110,6 +110,55 @@ def rwkv7_slot_recurrence_torch(
     return torch.stack(out, dim=1).reshape(B, T, C)
 
 
+def rwkv7_low_rank_slot_recurrence_torch(
+    r: Tensor,
+    w: Tensor,
+    k: Tensor,
+    v: Tensor,
+    a: Tensor,
+    b: Tensor,
+    slot_weights: Tensor,
+    head_size: int,
+    rank: int,
+) -> Tensor:
+    B, T, C = r.shape
+    H = C // head_size
+    S = slot_weights.shape[-1]
+    dtype = r.dtype
+    r = r.reshape(B, T, H, head_size)
+    k = k.reshape(B, T, H, head_size)
+    v = v.reshape(B, T, H, head_size)
+    a = a.reshape(B, T, H, head_size)
+    b = b.reshape(B, T, H, head_size)
+    decay = torch.exp(-torch.exp(w.float())).reshape(B, T, H, head_size)
+
+    state = torch.zeros(B, H, S, rank, head_size, device=r.device, dtype=torch.float32)
+    out = []
+    for t in range(T):
+        rt = r[:, t].float()
+        kt = k[:, t].float()
+        vt = v[:, t].float()
+        at = a[:, t].float()
+        bt = b[:, t].float()
+        wt = decay[:, t]
+        z = slot_weights[:, t].float()
+
+        k_rank = kt.reshape(B, H, rank, head_size // rank).mean(dim=-1)
+        r_rank = rt.reshape(B, H, rank, head_size // rank).mean(dim=-1)
+
+        sa = (state * at.unsqueeze(2).unsqueeze(2)).sum(dim=-1)
+        update = k_rank.unsqueeze(2).unsqueeze(-1) * vt.unsqueeze(2).unsqueeze(3)
+        update = update + sa.unsqueeze(-1) * bt.unsqueeze(2).unsqueeze(3)
+
+        z_state = z.unsqueeze(-1).unsqueeze(-1)
+        state = state * (1.0 - z_state + z_state * wt.unsqueeze(2).unsqueeze(2)) + z_state * update
+
+        slot_y = (state * r_rank.unsqueeze(2).unsqueeze(-1)).sum(dim=3)
+        yt = (slot_y * z.unsqueeze(-1)).sum(dim=2)
+        out.append(yt.to(dtype))
+    return torch.stack(out, dim=1).reshape(B, T, C)
+
+
 @dataclass
 class RWKV7Config:
     max_seq_len: int
@@ -637,6 +686,81 @@ class SlotRWKV7Mixer(RoutedRWKV7Mixer):
             reset_v_first=reset_rwkv7_v_first or rwkv7_v_first is None,
         )
         y = rwkv7_slot_recurrence_torch(r, w, k, v, a, b, slot_weights, self.head_size)
+        out = self.time_mix._finish_torch(y, r, k, v, g)
+
+        if mask is not None:
+            out = out * mask.unsqueeze(-1)
+            if rwkv7_v_first is not None:
+                rwkv7_v_first = rwkv7_v_first * mask.unsqueeze(-1)
+
+        return out, None, past_key_values, rwkv7_v_first
+
+
+class LowRankSlotRWKV7Mixer(SlotRWKV7Mixer):
+    """Explicit routed RWKV slots with low-rank per-slot state.
+
+    Full slot RWKV stores `state[slot, D, D]`. This variant stores
+    `state[slot, rank, D]`, using grouped averages of the RWKV key/read vectors
+    as low-rank write/read coefficients. It keeps slot-level routing while
+    making memory and compute scale with `rank * D` instead of `D * D`.
+    """
+
+    def __init__(
+        self,
+        *args,
+        low_rank: int = 8,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if low_rank <= 0:
+            raise ValueError("low_rank must be positive")
+        if self.head_size % low_rank != 0:
+            raise ValueError(f"head_size ({self.head_size}) must be divisible by low_rank ({low_rank})")
+        self.low_rank = low_rank
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        past_key_values=None,
+        use_cache: Optional[bool] = False,
+        output_attentions: Optional[bool] = False,
+        rwkv7_v_first: Optional[Tensor] = None,
+        reset_rwkv7_v_first: bool = False,
+        **_kwargs,
+    ):
+        if attention_mask is not None:
+            if attention_mask.dim() != 2:
+                raise ValueError("LowRankSlotRWKV7Mixer expects attention_mask with shape [batch_size, seq_len]")
+            mask = attention_mask[:, -hidden_states.shape[1] :].to(device=hidden_states.device, dtype=hidden_states.dtype)
+            hidden_states = hidden_states * mask.unsqueeze(-1)
+        else:
+            mask = None
+
+        if use_cache:
+            warnings.warn(
+                "LowRankSlotRWKV7Mixer does not maintain an incremental generation cache; falling back to full-prefix execution.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        slot_weights = self._slot_weights(hidden_states)
+        r, w, k, v, a, b, g, rwkv7_v_first = self.time_mix._project_torch(
+            hidden_states,
+            v_first=rwkv7_v_first,
+            reset_v_first=reset_rwkv7_v_first or rwkv7_v_first is None,
+        )
+        y = rwkv7_low_rank_slot_recurrence_torch(
+            r,
+            w,
+            k,
+            v,
+            a,
+            b,
+            slot_weights,
+            self.head_size,
+            self.low_rank,
+        )
         out = self.time_mix._finish_torch(y, r, k, v, g)
 
         if mask is not None:
