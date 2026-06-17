@@ -1,0 +1,68 @@
+{
+  "args": {
+    "mixers": [
+      "raven",
+      "rwkv7",
+      "routed_rwkv7"
+    ],
+    "device": "cuda",
+    "dtype": "bf16",
+    "batch_size": 2,
+    "seq_len": 512,
+    "hidden_size": 512,
+    "num_layers": 4,
+    "num_heads": 4,
+    "num_slots": 64,
+    "topk": 32,
+    "vocab_size": 32000,
+    "warmup": 3,
+    "steps": 10,
+    "backward": false,
+    "seed": 1234,
+    "rwkv_backend": "cuda",
+    "rwkv_head_size": 64,
+    "rwkv_chunk_len": 16,
+    "routed_rwkv_route_floor": 0.1,
+    "lt2_wrapper_root": null,
+    "lt2_cuda_dir": null,
+    "json_out": "outputs/compare_mixers_routed_forward_h512_l4_s512_b2.json"
+  },
+  "results": [
+    {
+      "mixer": "raven",
+      "params_m": 46.93968,
+      "batch_size": 2,
+      "seq_len": 512,
+      "steps": 10,
+      "backward": false,
+      "seconds": 0.040169591000449145,
+      "tokens_per_second": 254919.19994618578,
+      "peak_memory_gb": 0.122202112,
+      "last_metric": 0.0017833076417446136
+    },
+    {
+      "mixer": "rwkv7",
+      "params_m": 47.612416,
+      "batch_size": 2,
+      "seq_len": 512,
+      "steps": 10,
+      "backward": false,
+      "seconds": 0.02600101400003041,
+      "tokens_per_second": 393830.7944447099,
+      "peak_memory_gb": 0.136910848,
+      "last_metric": 0.0026491431053727865
+    },
+    {
+      "mixer": "routed_rwkv7",
+      "params_m": 48.660992,
+      "batch_size": 2,
+      "seq_len": 512,
+      "steps": 10,
+      "backward": false,
+      "seconds": 0.034403876999931526,
+      "tokens_per_second": 297640.87344052474,
+      "peak_memory_gb": 0.1411072,
+      "last_metric": 0.001948151970282197
+    }
+  ]
+}

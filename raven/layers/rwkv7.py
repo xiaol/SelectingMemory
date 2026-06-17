@@ -342,6 +342,9 @@ class RWKV7Mixer(nn.Module):
         self.layer_idx = layer_idx
         self.time_mix = RWKV7TimeMix(config, layer_idx)
 
+    def reset_parameters(self) -> None:
+        self.time_mix.reset_parameters()
+
     def forward(
         self,
         hidden_states: Tensor,
@@ -380,3 +383,139 @@ class RWKV7Mixer(nn.Module):
                 rwkv7_v_first = rwkv7_v_first * mask.unsqueeze(-1)
 
         return hidden_states, None, past_key_values, rwkv7_v_first
+
+
+class RoutedRWKV7Mixer(RWKV7Mixer):
+    """RWKV-7 mixer with Raven-style top-k routing over channel slots.
+
+    RWKV-7's recurrent state is dense rather than an explicit slot matrix. This
+    adapter gives it a routing-memory axis by partitioning each head into slots
+    and using a learned per-token router to gate selected slot groups before and
+    after the recurrent update.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_hidden_layers: int,
+        max_seq_len: int,
+        layer_idx: int,
+        head_size: int = 64,
+        backend: str = "auto",
+        chunk_len: int = 16,
+        enable_v_first_mix: bool = True,
+        norm_eps: float = 1e-6,
+        num_slots: int = 64,
+        topk: int = 32,
+        router_type: str = "lin",
+        router_score: str = "sigmoid",
+        add_gumbel_noise: bool = True,
+        route_floor: float = 0.1,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            hidden_size=hidden_size,
+            num_hidden_layers=num_hidden_layers,
+            max_seq_len=max_seq_len,
+            layer_idx=layer_idx,
+            head_size=head_size,
+            backend=backend,
+            chunk_len=chunk_len,
+            enable_v_first_mix=enable_v_first_mix,
+            norm_eps=norm_eps,
+            **kwargs,
+        )
+        if num_slots <= 0:
+            raise ValueError("num_slots must be positive")
+        if topk <= 0:
+            raise ValueError("topk must be positive")
+        if router_type not in {"lin", "mlp"}:
+            raise ValueError("router_type must be 'lin' or 'mlp'")
+        if router_score not in {"sigmoid", "softmax"}:
+            raise ValueError("router_score must be 'sigmoid' or 'softmax'")
+        if not 0.0 <= route_floor <= 1.0:
+            raise ValueError("route_floor must be in [0, 1]")
+
+        self.hidden_size = hidden_size
+        self.head_size = head_size
+        self.num_heads = hidden_size // head_size
+        self.num_slots = num_slots
+        self.topk = min(topk, num_slots)
+        self.router_score = router_score
+        self.add_gumbel_noise = add_gumbel_noise
+        self.route_floor = route_floor
+
+        if router_type == "lin":
+            self.router = nn.Linear(hidden_size, self.num_heads * num_slots, bias=False)
+        else:
+            self.router = nn.Sequential(
+                nn.Linear(hidden_size, hidden_size, bias=True),
+                nn.GELU(),
+                nn.Linear(hidden_size, self.num_heads * num_slots, bias=False),
+            )
+
+        slot_ids = torch.arange(head_size, dtype=torch.long) * num_slots // head_size
+        self.register_buffer("channel_slot_ids", slot_ids, persistent=False)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        if isinstance(self.router, nn.Linear):
+            nn.init.zeros_(self.router.weight)
+        else:
+            first = self.router[0]
+            last = self.router[-1]
+            nn.init.normal_(first.weight, mean=0.0, std=self.hidden_size ** -0.5)
+            nn.init.zeros_(first.bias)
+            nn.init.zeros_(last.weight)
+
+    def _route_mask(self, hidden_states: Tensor) -> Tensor:
+        B, T, _C = hidden_states.shape
+        logits = self.router(hidden_states).view(B, T, self.num_heads, self.num_slots)
+        if self.add_gumbel_noise and self.training:
+            logits = logits - torch.empty_like(logits).exponential_().log()
+
+        if self.router_score == "sigmoid":
+            scores = torch.sigmoid(logits)
+        else:
+            scores = torch.softmax(logits.float(), dim=-1).to(dtype=logits.dtype)
+
+        route_idx = scores.topk(self.topk, dim=-1).indices
+        route_weights = torch.gather(scores, dim=-1, index=route_idx)
+        if self.router_score == "sigmoid":
+            route_weights = route_weights / (route_weights.sum(dim=-1, keepdim=True) + 1e-9)
+
+        slot_weights = torch.zeros_like(scores).scatter_(-1, route_idx, route_weights)
+        channel_weights = torch.gather(
+            slot_weights,
+            dim=-1,
+            index=self.channel_slot_ids.view(1, 1, 1, self.head_size).expand(B, T, self.num_heads, self.head_size),
+        )
+        scale = self.num_slots / self.topk
+        channel_weights = self.route_floor + (1.0 - self.route_floor) * channel_weights * scale
+        return channel_weights.reshape(B, T, self.hidden_size).to(dtype=hidden_states.dtype)
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        past_key_values=None,
+        use_cache: Optional[bool] = False,
+        output_attentions: Optional[bool] = False,
+        rwkv7_v_first: Optional[Tensor] = None,
+        reset_rwkv7_v_first: bool = False,
+        **kwargs,
+    ):
+        route_mask = self._route_mask(hidden_states)
+        routed_hidden = hidden_states * route_mask
+        out, attentions, past_key_values, rwkv7_v_first = super().forward(
+            hidden_states=routed_hidden,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            rwkv7_v_first=rwkv7_v_first,
+            reset_rwkv7_v_first=reset_rwkv7_v_first,
+            **kwargs,
+        )
+        return out * route_mask, attentions, past_key_values, rwkv7_v_first

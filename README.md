@@ -215,7 +215,7 @@ Raven can also replace the default routing-memory layer with the original RWKV-7
 config = RavenConfig(
     hidden_size=1024,
     num_hidden_layers=24,
-    sequence_mixer="rwkv7",
+    sequence_mixer="rwkv7",  # or "routed_rwkv7"
     rwkv7_head_size=64,
     rwkv7_backend="cuda",
     rwkv7_chunk_len=16,
@@ -225,6 +225,8 @@ model = RavenForCausalLM(config)
 ```
 
 This path preserves Raven's embedding, normalization, MLP, LM head, and Hugging Face model API, while swapping `RavenAttention` for an RWKV-7 mixer inside each non-attention block.
+
+Use `sequence_mixer="routed_rwkv7"` to add a Raven-style top-k router over memory slots to the RWKV-7 mixer. Since RWKV-7's recurrent state is dense rather than an explicit slot matrix, this variant maps routed slots onto per-head channel groups and gates the RWKV update/output through the selected slot groups.
 
 To compare Raven vs. RWKV-7 with the same model shape:
 
@@ -313,5 +315,4 @@ This repo builds on [fla-org/flash-linear-attention] and depends on it for hardw
 }
 
 ```
-
 

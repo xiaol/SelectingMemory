@@ -17,7 +17,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from raven.layers.raven import RavenAttention
-from raven.layers.rwkv7 import RWKV7Mixer
+from raven.layers.rwkv7 import RWKV7Mixer, RoutedRWKV7Mixer
 from raven.models.raven.configuration_raven import RavenConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
@@ -51,8 +51,9 @@ class RavenBlock(nn.Module):
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx
             )
-        elif config.sequence_mixer == "rwkv7":
-            self.attn = RWKV7Mixer(
+        elif config.sequence_mixer in {"rwkv7", "routed_rwkv7"}:
+            mixer_cls = RoutedRWKV7Mixer if config.sequence_mixer == "routed_rwkv7" else RWKV7Mixer
+            self.attn = mixer_cls(
                 hidden_size=config.hidden_size,
                 num_hidden_layers=config.num_hidden_layers,
                 max_seq_len=config.max_position_embeddings,
@@ -62,6 +63,12 @@ class RavenBlock(nn.Module):
                 chunk_len=config.rwkv7_chunk_len,
                 enable_v_first_mix=config.rwkv7_enable_v_first_mix,
                 norm_eps=config.norm_eps,
+                num_slots=config.num_slots,
+                topk=config.topk,
+                router_type=config.router_type,
+                router_score=config.router_score,
+                add_gumbel_noise=config.add_gumbel_noise,
+                route_floor=config.routed_rwkv7_route_floor,
             )
         else:
             self.attn = RavenAttention(

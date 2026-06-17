@@ -48,7 +48,12 @@ def _configure_lt2_paths(args: argparse.Namespace) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mixers", nargs="+", default=["raven", "rwkv7"], choices=["raven", "rwkv7"])
+    parser.add_argument(
+        "--mixers",
+        nargs="+",
+        default=["raven", "rwkv7"],
+        choices=["raven", "rwkv7", "routed_rwkv7"],
+    )
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--batch-size", type=int, default=2)
@@ -66,6 +71,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rwkv-backend", default="cuda", choices=["cuda", "auto", "torch"])
     parser.add_argument("--rwkv-head-size", type=int, default=64)
     parser.add_argument("--rwkv-chunk-len", type=int, default=16)
+    parser.add_argument("--routed-rwkv-route-floor", type=float, default=0.1)
     parser.add_argument("--lt2-wrapper-root", type=Path, default=None, help="Repo root containing apps/LT2/rwkv7_cuda.py.")
     parser.add_argument("--lt2-cuda-dir", type=Path, default=None, help="Directory containing LT2 RWKV-7 CUDA sources.")
     parser.add_argument("--json-out", type=Path, default=None)
@@ -81,7 +87,7 @@ def _torch_dtype(torch, dtype_name: str):
 
 
 def _validate_cuda_rwkv_args(args: argparse.Namespace) -> None:
-    if "rwkv7" not in args.mixers or args.rwkv_backend != "cuda":
+    if not any(mixer in {"rwkv7", "routed_rwkv7"} for mixer in args.mixers) or args.rwkv_backend != "cuda":
         return
     if args.device != "cuda":
         raise ValueError("RWKV backend 'cuda' requires --device cuda.")
@@ -109,6 +115,7 @@ def _build_config(args: argparse.Namespace, mixer: str):
         rwkv7_backend=args.rwkv_backend,
         rwkv7_head_size=args.rwkv_head_size,
         rwkv7_chunk_len=args.rwkv_chunk_len,
+        routed_rwkv7_route_floor=args.routed_rwkv_route_floor,
     )
 
 

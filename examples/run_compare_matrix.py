@@ -42,6 +42,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rwkv-backend", default="cuda", choices=["cuda", "auto", "torch"])
     parser.add_argument("--rwkv-head-size", type=int, default=64)
     parser.add_argument("--rwkv-chunk-len", type=int, default=16)
+    parser.add_argument("--routed-rwkv-route-floor", type=float, default=0.1)
+    parser.add_argument(
+        "--mixers",
+        nargs="+",
+        default=["raven", "rwkv7"],
+        choices=["raven", "rwkv7", "routed_rwkv7"],
+    )
     parser.add_argument("--lt2-wrapper-root", type=Path, default=None)
     parser.add_argument("--lt2-cuda-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/matrix"))
@@ -52,7 +59,7 @@ def _parse_args() -> argparse.Namespace:
 def _make_compare_args(args: argparse.Namespace, seq_len: int, mode: str, repeat: int) -> argparse.Namespace:
     backward = mode == "backward"
     return argparse.Namespace(
-        mixers=["raven", "rwkv7"],
+        mixers=list(args.mixers),
         device=args.device,
         dtype=args.dtype,
         batch_size=args.batch_size,
@@ -70,6 +77,7 @@ def _make_compare_args(args: argparse.Namespace, seq_len: int, mode: str, repeat
         rwkv_backend=args.rwkv_backend,
         rwkv_head_size=args.rwkv_head_size,
         rwkv_chunk_len=args.rwkv_chunk_len,
+        routed_rwkv_route_floor=args.routed_rwkv_route_floor,
         lt2_wrapper_root=args.lt2_wrapper_root,
         lt2_cuda_dir=args.lt2_cuda_dir,
         json_out=None,
