@@ -207,9 +207,9 @@ config = RavenConfig(
 model = AutoModelForCausalLM.from_config(config).cuda()
 ```
 
-### RWKV-7 sequence mixer
+### RWKV-7 sequence mixers
 
-Raven can also replace the default routing-memory layer with the original RWKV-7 time mixer adapted from HRM-Text:
+This fork can also replace the default routing-memory layer with RWKV-7 mixers adapted from HRM-Text. The implementation keeps Raven's embedding, normalization, MLP, LM head, and Hugging Face model API, while swapping `RavenAttention` for an RWKV-7 mixer inside each non-attention block.
 
 ```python
 config = RavenConfig(
@@ -219,21 +219,21 @@ config = RavenConfig(
     rwkv7_head_size=64,
     rwkv7_backend="cuda",
     rwkv7_chunk_len=16,
+    low_rank_slot_rwkv7_rank=8,
+    low_rank_slot_rwkv7_backend="triton_fused",
     vocab_size=32000,
 )
 model = RavenForCausalLM(config)
 ```
 
-This path preserves Raven's embedding, normalization, MLP, LM head, and Hugging Face model API, while swapping `RavenAttention` for an RWKV-7 mixer inside each non-attention block.
+Implemented options:
 
-RWKV mixer options:
-
-| `sequence_mixer` | Routing granularity | Kernel path |
-| --- | --- | --- |
-| `"rwkv7"` | Dense RWKV-7 state, no router | LT2 CUDA when available |
-| `"routed_rwkv7"` | Raven-style top-k router mapped to per-head channel groups | LT2 CUDA when available |
-| `"slot_rwkv7"` | Explicit per-head recurrent slot states, closest to Raven memory slots | PyTorch CUDA recurrence |
-| `"low_rank_slot_rwkv7"` | Explicit routed slots with low-rank per-slot state | Triton forward/backward when selected |
+| `sequence_mixer` | Memory/routing granularity | State size per head | Kernel path | Training status |
+| --- | --- | ---: | --- | --- |
+| `"rwkv7"` | Dense RWKV-7 state, no router | `D x D` | LT2 CUDA when available | Trainable baseline |
+| `"routed_rwkv7"` | Raven-style top-k router mapped to per-head channel groups | `D x D` | LT2 CUDA when available | Trainable router adapter |
+| `"slot_rwkv7"` | Explicit per-head recurrent slot states, closest to Raven memory slots | `num_slots x D x D` | PyTorch CUDA recurrence | Correct but slow |
+| `"low_rank_slot_rwkv7"` | Explicit routed slots with low-rank per-slot state | `num_slots x rank x D` | Triton forward/backward with `triton_fused` | Ready-to-train comparison path |
 
 Use `sequence_mixer="slot_rwkv7"` when you want RWKV to have Raven-level routed memory slots. It creates `num_slots` independent RWKV state matrices per head and applies the router inside the recurrent update. This is semantically closer to Raven, but slower until a dedicated slot-aware CUDA kernel is written.
 
@@ -256,6 +256,52 @@ python examples/compare_mixers.py \
 ```
 
 Use `--backward` to compare training-step cost instead of inference-only forward cost. The LT2 CUDA path currently requires BF16, `rwkv7_head_size=64`, and `rwkv7_chunk_len=16`.
+
+For held-out loss comparisons on the already-prepared HRM-Text token subset, use:
+
+```sh
+PYTHONPATH=/home/xiaol/X/HRM-Text:/home/xiaol/X/raven:$PYTHONPATH \
+LT2_RWKV7_CUDA_DIR=/home/xiaol/X/LT2_upstream/apps/LT2/cuda/rwkv7 \
+/home/xiaol/X/HRM-Text/.venv/bin/python examples/compare_hrm_text_losses.py \
+  --dataset-path /home/xiaol/X/hrm_text_subset_1B \
+  --out-dir outputs/hrm_text_loss_compare_raven_vs_low_rank_slot_rwkv7_s500 \
+  --steps 500 \
+  --eval-every 100 \
+  --eval-batches 20 \
+  --batch-size 4 \
+  --seq-len 128 \
+  --hidden-size 256 \
+  --num-layers 2 \
+  --num-heads 4 \
+  --num-slots 64 \
+  --topk 16 \
+  --low-rank-slot-rwkv-rank 8 \
+  --low-rank-slot-rwkv-backend triton_fused \
+  --lr 3e-4 \
+  --warmup-steps 50 \
+  --dtype bf16 \
+  --device cuda
+```
+
+Local HRM-Text causal-LM loss result on RTX 4090, using the command above:
+
+| mixer | params M | initial val | final val | best val | final train | tok/s | peak GB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `raven` | 35.39 | 11.1281 | 2.9195 | 2.9195 | 2.5000 | 49,627 | 0.448 |
+| `low_rank_slot_rwkv7` | 35.56 | 11.0938 | 2.6273 | 2.6273 | 1.9531 | 52,854 | 0.991 |
+
+Validation checkpoints:
+
+| step | `raven` | `low_rank_slot_rwkv7` |
+| ---: | ---: | ---: |
+| 0 | 11.1281 | 11.0938 |
+| 100 | 3.8078 | 3.2961 |
+| 200 | 3.2234 | 2.8469 |
+| 300 | 2.9813 | 2.6836 |
+| 400 | 2.9367 | 2.6406 |
+| 500 | 2.9195 | 2.6273 |
+
+In this short local run, the train-ready low-rank slot RWKV path reaches lower held-out loss and slightly higher throughput than the Raven mixer, with higher VRAM use from cached low-rank slot states during fused backward. Full results are saved in `outputs/hrm_text_loss_compare_raven_vs_low_rank_slot_rwkv7_s500/`.
 
 ---
 
