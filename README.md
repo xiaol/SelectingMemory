@@ -233,11 +233,11 @@ RWKV mixer options:
 | `"rwkv7"` | Dense RWKV-7 state, no router | LT2 CUDA when available |
 | `"routed_rwkv7"` | Raven-style top-k router mapped to per-head channel groups | LT2 CUDA when available |
 | `"slot_rwkv7"` | Explicit per-head recurrent slot states, closest to Raven memory slots | PyTorch CUDA recurrence |
-| `"low_rank_slot_rwkv7"` | Explicit routed slots with low-rank per-slot state | Triton forward, PyTorch CUDA backward |
+| `"low_rank_slot_rwkv7"` | Explicit routed slots with low-rank per-slot state | Triton forward/backward when selected |
 
 Use `sequence_mixer="slot_rwkv7"` when you want RWKV to have Raven-level routed memory slots. It creates `num_slots` independent RWKV state matrices per head and applies the router inside the recurrent update. This is semantically closer to Raven, but slower until a dedicated slot-aware CUDA kernel is written.
 
-Use `sequence_mixer="low_rank_slot_rwkv7"` to keep explicit routed slots but reduce each slot state from `head_dim x head_dim` to `rank x head_dim`; configure the rank with `low_rank_slot_rwkv7_rank`. Forward/eval can use the Triton kernel via `low_rank_slot_rwkv7_backend="auto"` or `"triton"`. Use `"triton_autograd"` to run Triton forward during training with a PyTorch recompute backward; a fully fused backward kernel is still future work.
+Use `sequence_mixer="low_rank_slot_rwkv7"` to keep explicit routed slots but reduce each slot state from `head_dim x head_dim` to `rank x head_dim`; configure the rank with `low_rank_slot_rwkv7_rank`. Forward/eval can use the Triton kernel via `low_rank_slot_rwkv7_backend="auto"` or `"triton"`. For training, use `"triton_fused"` for a Triton reverse-scan backward, or `"triton_autograd"` to keep the older Triton-forward/PyTorch-recompute backward path for debugging.
 
 To compare Raven vs. RWKV-7 with the same model shape:
 

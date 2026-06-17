@@ -109,8 +109,10 @@ class RavenConfig(PretrainedConfig):
             raise ValueError(
                 "sequence_mixer must be 'raven', 'rwkv7', 'routed_rwkv7', 'slot_rwkv7', or 'low_rank_slot_rwkv7'"
             )
-        if low_rank_slot_rwkv7_backend not in {"auto", "triton", "triton_autograd", "torch"}:
-            raise ValueError("low_rank_slot_rwkv7_backend must be 'auto', 'triton', 'triton_autograd', or 'torch'")
+        if low_rank_slot_rwkv7_backend not in {"auto", "triton", "triton_autograd", "triton_fused", "torch"}:
+            raise ValueError(
+                "low_rank_slot_rwkv7_backend must be 'auto', 'triton', 'triton_autograd', 'triton_fused', or 'torch'"
+            )
 
         if attn is not None:
             if not isinstance(attn, Dict):

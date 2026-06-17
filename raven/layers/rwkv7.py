@@ -70,6 +70,153 @@ if triton is not None:
             tl.atomic_add(out_ptr + token_base + offs_d, yt, sem="relaxed")
 
 
+    @triton.jit
+    def _low_rank_slot_rwkv7_fwd_states_kernel(
+        r_ptr,
+        w_ptr,
+        k_ptr,
+        v_ptr,
+        a_ptr,
+        b_ptr,
+        slot_ptr,
+        out_ptr,
+        states_ptr,
+        T: tl.constexpr,
+        C: tl.constexpr,
+        H: tl.constexpr,
+        S: tl.constexpr,
+        D: tl.constexpr,
+        RANK: tl.constexpr,
+        GROUP: tl.constexpr,
+    ):
+        pid_b = tl.program_id(0)
+        pid_h = tl.program_id(1)
+        pid_s = tl.program_id(2)
+
+        offs_d = tl.arange(0, D)
+        offs_r = tl.arange(0, RANK)
+        offs_g = tl.arange(0, GROUP)
+        state = tl.zeros((RANK, D), dtype=tl.float32)
+
+        for t in range(0, T):
+            token_base = (pid_b * T + t) * C + pid_h * D
+            slot_offset = ((pid_b * T + t) * H + pid_h) * S + pid_s
+            state_base = (((pid_b * T + t) * H + pid_h) * S + pid_s) * RANK * D
+
+            wt = tl.load(w_ptr + token_base + offs_d).to(tl.float32)
+            vt = tl.load(v_ptr + token_base + offs_d).to(tl.float32)
+            at = tl.load(a_ptr + token_base + offs_d).to(tl.float32)
+            bt = tl.load(b_ptr + token_base + offs_d).to(tl.float32)
+            zt = tl.load(slot_ptr + slot_offset).to(tl.float32)
+
+            grouped = offs_r[:, None] * GROUP + offs_g[None, :]
+            k_rank = tl.sum(tl.load(k_ptr + token_base + grouped).to(tl.float32), axis=1) / GROUP
+            r_rank = tl.sum(tl.load(r_ptr + token_base + grouped).to(tl.float32), axis=1) / GROUP
+
+            decay = tl.exp(-tl.exp(wt))
+            sa = tl.sum(state * at[None, :], axis=1)
+            update = k_rank[:, None] * vt[None, :] + sa[:, None] * bt[None, :]
+            state = state * (1.0 - zt + zt * decay[None, :]) + zt * update
+            tl.store(states_ptr + state_base + offs_r[:, None] * D + offs_d[None, :], state)
+
+            yt = tl.sum(state * r_rank[:, None], axis=0) * zt
+            tl.atomic_add(out_ptr + token_base + offs_d, yt, sem="relaxed")
+
+
+    @triton.jit
+    def _low_rank_slot_rwkv7_bwd_kernel(
+        r_ptr,
+        w_ptr,
+        k_ptr,
+        v_ptr,
+        a_ptr,
+        b_ptr,
+        slot_ptr,
+        grad_out_ptr,
+        states_ptr,
+        grad_r_ptr,
+        grad_w_ptr,
+        grad_k_ptr,
+        grad_v_ptr,
+        grad_a_ptr,
+        grad_b_ptr,
+        grad_slot_ptr,
+        T: tl.constexpr,
+        C: tl.constexpr,
+        H: tl.constexpr,
+        S: tl.constexpr,
+        D: tl.constexpr,
+        RANK: tl.constexpr,
+        GROUP: tl.constexpr,
+    ):
+        pid_b = tl.program_id(0)
+        pid_h = tl.program_id(1)
+        pid_s = tl.program_id(2)
+
+        offs_d = tl.arange(0, D)
+        offs_r = tl.arange(0, RANK)
+        offs_g = tl.arange(0, GROUP)
+        grouped = offs_r[:, None] * GROUP + offs_g[None, :]
+        grad_state = tl.zeros((RANK, D), dtype=tl.float32)
+
+        for t_rev in range(0, T):
+            t = T - 1 - t_rev
+            token_base = (pid_b * T + t) * C + pid_h * D
+            slot_offset = ((pid_b * T + t) * H + pid_h) * S + pid_s
+            state_base = (((pid_b * T + t) * H + pid_h) * S + pid_s) * RANK * D
+            prev_state_base = (((pid_b * T + t - 1) * H + pid_h) * S + pid_s) * RANK * D
+
+            state = tl.load(states_ptr + state_base + offs_r[:, None] * D + offs_d[None, :]).to(tl.float32)
+            state_prev = tl.load(
+                states_ptr + prev_state_base + offs_r[:, None] * D + offs_d[None, :],
+                mask=t > 0,
+                other=0.0,
+            ).to(tl.float32)
+
+            wt = tl.load(w_ptr + token_base + offs_d).to(tl.float32)
+            vt = tl.load(v_ptr + token_base + offs_d).to(tl.float32)
+            at = tl.load(a_ptr + token_base + offs_d).to(tl.float32)
+            bt = tl.load(b_ptr + token_base + offs_d).to(tl.float32)
+            zt = tl.load(slot_ptr + slot_offset).to(tl.float32)
+            gout = tl.load(grad_out_ptr + token_base + offs_d).to(tl.float32)
+
+            k_rank = tl.sum(tl.load(k_ptr + token_base + grouped).to(tl.float32), axis=1) / GROUP
+            r_rank = tl.sum(tl.load(r_ptr + token_base + grouped).to(tl.float32), axis=1) / GROUP
+            decay = tl.exp(-tl.exp(wt))
+            exp_w = tl.exp(wt)
+
+            sa = tl.sum(state_prev * at[None, :], axis=1)
+            update = k_rank[:, None] * vt[None, :] + sa[:, None] * bt[None, :]
+            y_no_slot = tl.sum(state * r_rank[:, None], axis=0)
+
+            grad_r_rank = tl.sum(state * gout[None, :], axis=1) * zt
+            grad_zt = tl.sum(gout * y_no_slot, axis=0)
+
+            grad_state_total = grad_state + gout[None, :] * zt * r_rank[:, None]
+            grad_update = grad_state_total * zt
+            grad_k_rank = tl.sum(grad_update * vt[None, :], axis=1)
+            grad_v = tl.sum(grad_update * k_rank[:, None], axis=0)
+            grad_sa = tl.sum(grad_update * bt[None, :], axis=1)
+            grad_b = tl.sum(grad_update * sa[:, None], axis=0)
+            grad_a = tl.sum(grad_sa[:, None] * state_prev, axis=0)
+            grad_decay = tl.sum(grad_state_total * state_prev, axis=0) * zt
+            grad_w = grad_decay * (-exp_w * decay)
+
+            grad_zt = grad_zt + tl.sum(
+                tl.sum(grad_state_total * (state_prev * (decay[None, :] - 1.0) + update), axis=1),
+                axis=0,
+            )
+            grad_state = grad_state_total * (1.0 - zt + zt * decay[None, :]) + grad_sa[:, None] * at[None, :]
+
+            tl.atomic_add(grad_r_ptr + token_base + grouped, grad_r_rank[:, None] / GROUP, sem="relaxed")
+            tl.atomic_add(grad_k_ptr + token_base + grouped, grad_k_rank[:, None] / GROUP, sem="relaxed")
+            tl.atomic_add(grad_w_ptr + token_base + offs_d, grad_w, sem="relaxed")
+            tl.atomic_add(grad_v_ptr + token_base + offs_d, grad_v, sem="relaxed")
+            tl.atomic_add(grad_a_ptr + token_base + offs_d, grad_a, sem="relaxed")
+            tl.atomic_add(grad_b_ptr + token_base + offs_d, grad_b, sem="relaxed")
+            tl.store(grad_slot_ptr + slot_offset, grad_zt)
+
+
 def _ortho_init_(x: Tensor, scale: float = 1.0) -> Tensor:
     with torch.no_grad():
         shape = x.shape
@@ -265,6 +412,62 @@ def rwkv7_low_rank_slot_recurrence_triton(
     return out
 
 
+def _validate_low_rank_slot_triton_inputs(
+    r: Tensor,
+    head_size: int,
+    rank: int,
+) -> Tuple[int, int, int, int, int]:
+    if triton is None:
+        raise RuntimeError("Triton is not installed")
+    if not r.is_cuda:
+        raise RuntimeError("Triton low-rank slot RWKV requires CUDA tensors")
+    if r.dtype != torch.bfloat16:
+        raise RuntimeError("Triton low-rank slot RWKV currently requires bfloat16 tensors")
+    if head_size % rank != 0:
+        raise ValueError(f"head_size ({head_size}) must be divisible by rank ({rank})")
+    B, T, C = r.shape
+    H = C // head_size
+    group = head_size // rank
+    return B, T, C, H, group
+
+
+def rwkv7_low_rank_slot_recurrence_triton_with_states(
+    r: Tensor,
+    w: Tensor,
+    k: Tensor,
+    v: Tensor,
+    a: Tensor,
+    b: Tensor,
+    slot_weights: Tensor,
+    head_size: int,
+    rank: int,
+) -> Tuple[Tensor, Tensor]:
+    B, T, C, H, group = _validate_low_rank_slot_triton_inputs(r, head_size, rank)
+    S = slot_weights.shape[-1]
+    out = torch.zeros_like(r)
+    states = torch.empty((B, T, H, S, rank, head_size), device=r.device, dtype=torch.float32)
+    _low_rank_slot_rwkv7_fwd_states_kernel[(B, H, S)](
+        r.contiguous(),
+        w.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        a.contiguous(),
+        b.contiguous(),
+        slot_weights.contiguous(),
+        out,
+        states,
+        T,
+        C,
+        H,
+        S,
+        head_size,
+        rank,
+        group,
+        num_warps=4,
+    )
+    return out, states
+
+
 class _LowRankSlotRWKV7TritonFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, r: Tensor, w: Tensor, k: Tensor, v: Tensor, a: Tensor, b: Tensor, slot_weights: Tensor, head_size: int, rank: int):
@@ -310,6 +513,91 @@ def rwkv7_low_rank_slot_recurrence_triton_autograd(
     rank: int,
 ) -> Tensor:
     return _LowRankSlotRWKV7TritonFn.apply(r, w, k, v, a, b, slot_weights, head_size, rank)
+
+
+class _LowRankSlotRWKV7TritonFusedFn(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        r: Tensor,
+        w: Tensor,
+        k: Tensor,
+        v: Tensor,
+        a: Tensor,
+        b: Tensor,
+        slot_weights: Tensor,
+        head_size: int,
+        rank: int,
+    ):
+        ctx.head_size = head_size
+        ctx.rank = rank
+        out, states = rwkv7_low_rank_slot_recurrence_triton_with_states(
+            r,
+            w,
+            k,
+            v,
+            a,
+            b,
+            slot_weights,
+            head_size,
+            rank,
+        )
+        ctx.save_for_backward(r, w, k, v, a, b, slot_weights, states)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out: Tensor):
+        r, w, k, v, a, b, slot_weights, states = ctx.saved_tensors
+        B, T, C, H, group = _validate_low_rank_slot_triton_inputs(r, ctx.head_size, ctx.rank)
+        S = slot_weights.shape[-1]
+        grad_r = torch.zeros_like(r)
+        grad_w = torch.zeros_like(w)
+        grad_k = torch.zeros_like(k)
+        grad_v = torch.zeros_like(v)
+        grad_a = torch.zeros_like(a)
+        grad_b = torch.zeros_like(b)
+        grad_slot = torch.empty_like(slot_weights)
+        _low_rank_slot_rwkv7_bwd_kernel[(B, H, S)](
+            r.contiguous(),
+            w.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            a.contiguous(),
+            b.contiguous(),
+            slot_weights.contiguous(),
+            grad_out.contiguous(),
+            states,
+            grad_r,
+            grad_w,
+            grad_k,
+            grad_v,
+            grad_a,
+            grad_b,
+            grad_slot,
+            T,
+            C,
+            H,
+            S,
+            ctx.head_size,
+            ctx.rank,
+            group,
+            num_warps=4,
+        )
+        return grad_r, grad_w, grad_k, grad_v, grad_a, grad_b, grad_slot, None, None
+
+
+def rwkv7_low_rank_slot_recurrence_triton_fused(
+    r: Tensor,
+    w: Tensor,
+    k: Tensor,
+    v: Tensor,
+    a: Tensor,
+    b: Tensor,
+    slot_weights: Tensor,
+    head_size: int,
+    rank: int,
+) -> Tensor:
+    return _LowRankSlotRWKV7TritonFusedFn.apply(r, w, k, v, a, b, slot_weights, head_size, rank)
 
 
 @dataclass
@@ -870,15 +1158,15 @@ class LowRankSlotRWKV7Mixer(SlotRWKV7Mixer):
             raise ValueError("low_rank must be positive")
         if self.head_size % low_rank != 0:
             raise ValueError(f"head_size ({self.head_size}) must be divisible by low_rank ({low_rank})")
-        if low_rank_backend not in {"auto", "triton", "triton_autograd", "torch"}:
-            raise ValueError("low_rank_backend must be 'auto', 'triton', 'triton_autograd', or 'torch'")
+        if low_rank_backend not in {"auto", "triton", "triton_autograd", "triton_fused", "torch"}:
+            raise ValueError("low_rank_backend must be 'auto', 'triton', 'triton_autograd', 'triton_fused', or 'torch'")
         self.low_rank = low_rank
         self.low_rank_backend = low_rank_backend
 
     def _should_use_triton(self, r: Tensor) -> bool:
         if self.low_rank_backend == "torch":
             return False
-        if self.low_rank_backend in {"triton", "triton_autograd"}:
+        if self.low_rank_backend in {"triton", "triton_autograd", "triton_fused"}:
             return True
         return not torch.is_grad_enabled() and r.is_cuda and r.dtype == torch.bfloat16 and triton is not None
 
@@ -916,7 +1204,9 @@ class LowRankSlotRWKV7Mixer(SlotRWKV7Mixer):
         )
         if self._should_use_triton(r):
             triton_fn = (
-                rwkv7_low_rank_slot_recurrence_triton_autograd
+                rwkv7_low_rank_slot_recurrence_triton_fused
+                if self.low_rank_backend == "triton_fused" and torch.is_grad_enabled()
+                else rwkv7_low_rank_slot_recurrence_triton_autograd
                 if self.low_rank_backend == "triton_autograd" and torch.is_grad_enabled()
                 else rwkv7_low_rank_slot_recurrence_triton
             )
