@@ -1,0 +1,44 @@
+{
+  "args": {
+    "mixers": [
+      "low_rank_slot_rwkv7"
+    ],
+    "device": "cuda",
+    "dtype": "bf16",
+    "batch_size": 1,
+    "seq_len": 32,
+    "hidden_size": 128,
+    "num_layers": 2,
+    "num_heads": 2,
+    "num_slots": 16,
+    "topk": 4,
+    "vocab_size": 32000,
+    "warmup": 1,
+    "steps": 2,
+    "backward": true,
+    "seed": 1234,
+    "rwkv_backend": "cuda",
+    "rwkv_head_size": 64,
+    "rwkv_chunk_len": 16,
+    "routed_rwkv_route_floor": 0.1,
+    "low_rank_slot_rwkv_rank": 8,
+    "low_rank_slot_rwkv_backend": "triton_autograd",
+    "lt2_wrapper_root": null,
+    "lt2_cuda_dir": null,
+    "json_out": "outputs/compare_mixers_low_rank_slot_triton_autograd_backward_h128_l2_s32_b1.json"
+  },
+  "results": [
+    {
+      "mixer": "low_rank_slot_rwkv7",
+      "params_m": 8.810624,
+      "batch_size": 1,
+      "seq_len": 32,
+      "steps": 2,
+      "backward": true,
+      "seconds": 0.06828439199853165,
+      "tokens_per_second": 937.2566427973208,
+      "peak_memory_gb": 0.05499648,
+      "last_metric": 10.5
+    }
+  ]
+}

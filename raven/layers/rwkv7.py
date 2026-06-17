@@ -265,6 +265,53 @@ def rwkv7_low_rank_slot_recurrence_triton(
     return out
 
 
+class _LowRankSlotRWKV7TritonFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, r: Tensor, w: Tensor, k: Tensor, v: Tensor, a: Tensor, b: Tensor, slot_weights: Tensor, head_size: int, rank: int):
+        ctx.head_size = head_size
+        ctx.rank = rank
+        ctx.save_for_backward(r, w, k, v, a, b, slot_weights)
+        return rwkv7_low_rank_slot_recurrence_triton(r, w, k, v, a, b, slot_weights, head_size, rank)
+
+    @staticmethod
+    def backward(ctx, grad_out: Tensor):
+        saved = ctx.saved_tensors
+        with torch.enable_grad():
+            r, w, k, v, a, b, slot_weights = [tensor.detach().requires_grad_(True) for tensor in saved]
+            y = rwkv7_low_rank_slot_recurrence_torch(
+                r,
+                w,
+                k,
+                v,
+                a,
+                b,
+                slot_weights,
+                ctx.head_size,
+                ctx.rank,
+            )
+        grads = torch.autograd.grad(
+            y,
+            (r, w, k, v, a, b, slot_weights),
+            grad_out,
+            allow_unused=True,
+        )
+        return (*grads, None, None)
+
+
+def rwkv7_low_rank_slot_recurrence_triton_autograd(
+    r: Tensor,
+    w: Tensor,
+    k: Tensor,
+    v: Tensor,
+    a: Tensor,
+    b: Tensor,
+    slot_weights: Tensor,
+    head_size: int,
+    rank: int,
+) -> Tensor:
+    return _LowRankSlotRWKV7TritonFn.apply(r, w, k, v, a, b, slot_weights, head_size, rank)
+
+
 @dataclass
 class RWKV7Config:
     max_seq_len: int
@@ -823,15 +870,15 @@ class LowRankSlotRWKV7Mixer(SlotRWKV7Mixer):
             raise ValueError("low_rank must be positive")
         if self.head_size % low_rank != 0:
             raise ValueError(f"head_size ({self.head_size}) must be divisible by low_rank ({low_rank})")
-        if low_rank_backend not in {"auto", "triton", "torch"}:
-            raise ValueError("low_rank_backend must be 'auto', 'triton', or 'torch'")
+        if low_rank_backend not in {"auto", "triton", "triton_autograd", "torch"}:
+            raise ValueError("low_rank_backend must be 'auto', 'triton', 'triton_autograd', or 'torch'")
         self.low_rank = low_rank
         self.low_rank_backend = low_rank_backend
 
     def _should_use_triton(self, r: Tensor) -> bool:
         if self.low_rank_backend == "torch":
             return False
-        if self.low_rank_backend == "triton":
+        if self.low_rank_backend in {"triton", "triton_autograd"}:
             return True
         return not torch.is_grad_enabled() and r.is_cuda and r.dtype == torch.bfloat16 and triton is not None
 
@@ -868,7 +915,12 @@ class LowRankSlotRWKV7Mixer(SlotRWKV7Mixer):
             reset_v_first=reset_rwkv7_v_first or rwkv7_v_first is None,
         )
         if self._should_use_triton(r):
-            y = rwkv7_low_rank_slot_recurrence_triton(
+            triton_fn = (
+                rwkv7_low_rank_slot_recurrence_triton_autograd
+                if self.low_rank_backend == "triton_autograd" and torch.is_grad_enabled()
+                else rwkv7_low_rank_slot_recurrence_triton
+            )
+            y = triton_fn(
                 r,
                 w,
                 k,

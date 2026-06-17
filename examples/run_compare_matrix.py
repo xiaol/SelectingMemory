@@ -44,7 +44,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rwkv-chunk-len", type=int, default=16)
     parser.add_argument("--routed-rwkv-route-floor", type=float, default=0.1)
     parser.add_argument("--low-rank-slot-rwkv-rank", type=int, default=8)
-    parser.add_argument("--low-rank-slot-rwkv-backend", default="auto", choices=["auto", "triton", "torch"])
+    parser.add_argument("--low-rank-slot-rwkv-backend", default="auto", choices=["auto", "triton", "triton_autograd", "torch"])
     parser.add_argument(
         "--mixers",
         nargs="+",

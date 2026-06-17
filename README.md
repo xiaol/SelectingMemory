@@ -237,7 +237,7 @@ RWKV mixer options:
 
 Use `sequence_mixer="slot_rwkv7"` when you want RWKV to have Raven-level routed memory slots. It creates `num_slots` independent RWKV state matrices per head and applies the router inside the recurrent update. This is semantically closer to Raven, but slower until a dedicated slot-aware CUDA kernel is written.
 
-Use `sequence_mixer="low_rank_slot_rwkv7"` to keep explicit routed slots but reduce each slot state from `head_dim x head_dim` to `rank x head_dim`; configure the rank with `low_rank_slot_rwkv7_rank`. Forward/eval can use the Triton kernel via `low_rank_slot_rwkv7_backend="auto"` or `"triton"`; training currently falls back to the PyTorch recurrence so gradients remain available.
+Use `sequence_mixer="low_rank_slot_rwkv7"` to keep explicit routed slots but reduce each slot state from `head_dim x head_dim` to `rank x head_dim`; configure the rank with `low_rank_slot_rwkv7_rank`. Forward/eval can use the Triton kernel via `low_rank_slot_rwkv7_backend="auto"` or `"triton"`. Use `"triton_autograd"` to run Triton forward during training with a PyTorch recompute backward; a fully fused backward kernel is still future work.
 
 To compare Raven vs. RWKV-7 with the same model shape:
 
