@@ -66,6 +66,50 @@ def rwkv7_recurrence_torch(
     return torch.stack(out, dim=1).reshape(B, T, C)
 
 
+def rwkv7_slot_recurrence_torch(
+    r: Tensor,
+    w: Tensor,
+    k: Tensor,
+    v: Tensor,
+    a: Tensor,
+    b: Tensor,
+    slot_weights: Tensor,
+    head_size: int,
+) -> Tensor:
+    B, T, C = r.shape
+    H = C // head_size
+    S = slot_weights.shape[-1]
+    dtype = r.dtype
+    r = r.reshape(B, T, H, head_size)
+    k = k.reshape(B, T, H, head_size)
+    v = v.reshape(B, T, H, head_size)
+    a = a.reshape(B, T, H, head_size)
+    b = b.reshape(B, T, H, head_size)
+    decay = torch.exp(-torch.exp(w.float())).reshape(B, T, H, head_size)
+    state = torch.zeros(B, H, S, head_size, head_size, device=r.device, dtype=torch.float32)
+    out = []
+    for t in range(T):
+        rt = r[:, t].float()
+        kt = k[:, t].float()
+        vt = v[:, t].float()
+        at = a[:, t].float()
+        bt = b[:, t].float()
+        wt = decay[:, t]
+        z = slot_weights[:, t].float()
+
+        sa = (state * at.unsqueeze(2).unsqueeze(-2)).sum(dim=-1)
+        update = vt.unsqueeze(2).unsqueeze(-1) * kt.unsqueeze(2).unsqueeze(-2)
+        update = update + sa.unsqueeze(-1) * bt.unsqueeze(2).unsqueeze(-2)
+
+        z_state = z.unsqueeze(-1).unsqueeze(-1)
+        state = state * (1.0 - z_state + z_state * wt.unsqueeze(2).unsqueeze(-2)) + z_state * update
+
+        slot_y = (state * rt.unsqueeze(2).unsqueeze(-2)).sum(dim=-1)
+        yt = (slot_y * z.unsqueeze(-1)).sum(dim=2)
+        out.append(yt.to(dtype))
+    return torch.stack(out, dim=1).reshape(B, T, C)
+
+
 @dataclass
 class RWKV7Config:
     max_seq_len: int
@@ -252,21 +296,12 @@ class RWKV7TimeMix(nn.Module):
         )
         return self.output(y), v_first
 
-    def forward(
+    def _project_torch(
         self,
         x: Tensor,
-        v_first: Optional[Tensor] = None,
-        reset_v_first: bool = False,
-    ) -> Tuple[Tensor, Tensor]:
-        self._validate_cuda_required(x)
-        if self._can_use_cuda(x):
-            try:
-                return self._forward_cuda(x, v_first, reset_v_first)
-            except Exception as exc:
-                if self.backend == "cuda":
-                    raise
-                warnings.warn(f"Falling back to PyTorch RWKV-7 backend: {exc}", RuntimeWarning, stacklevel=2)
-
+        v_first: Optional[Tensor],
+        reset_v_first: bool,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         B, T, C = x.shape
         xx = _time_shift_delta(x)
         xr = x + xx * self.x_r.to(dtype=x.dtype).view(1, 1, -1)
@@ -297,17 +332,39 @@ class RWKV7TimeMix(nn.Module):
         kk = k * self.k_k.to(dtype=x.dtype).view(1, 1, -1)
         kk = F.normalize(kk.reshape(B, T, self.n_head, self.head_size), dim=-1, p=2.0).reshape(B, T, C)
         k = k * (1 + (a - 1) * self.k_a.to(dtype=x.dtype).view(1, 1, -1))
-        y = rwkv7_recurrence_torch(r, w, k, v, -kk, kk * a, self.head_size)
+        return r, w, k, v, -kk, kk * a, g, v_first
+
+    def _finish_torch(self, y: Tensor, r: Tensor, k: Tensor, v: Tensor, g: Tensor) -> Tensor:
+        B, T, C = y.shape
         y = self.ln_x(y.reshape(B * T, C)).reshape(B, T, C)
         y = y + (
             (
                 r.reshape(B, T, self.n_head, self.head_size)
                 * k.reshape(B, T, self.n_head, self.head_size)
-                * self.r_k.to(dtype=x.dtype)
+                * self.r_k.to(dtype=y.dtype)
             ).sum(dim=-1, keepdim=True)
             * v.reshape(B, T, self.n_head, self.head_size)
         ).reshape(B, T, C)
-        return self.output(y * g), v_first
+        return self.output(y * g)
+
+    def forward(
+        self,
+        x: Tensor,
+        v_first: Optional[Tensor] = None,
+        reset_v_first: bool = False,
+    ) -> Tuple[Tensor, Tensor]:
+        self._validate_cuda_required(x)
+        if self._can_use_cuda(x):
+            try:
+                return self._forward_cuda(x, v_first, reset_v_first)
+            except Exception as exc:
+                if self.backend == "cuda":
+                    raise
+                warnings.warn(f"Falling back to PyTorch RWKV-7 backend: {exc}", RuntimeWarning, stacklevel=2)
+
+        r, w, k, v, a, b, g, v_first = self._project_torch(x, v_first, reset_v_first)
+        y = rwkv7_recurrence_torch(r, w, k, v, a, b, self.head_size)
+        return self._finish_torch(y, r, k, v, g), v_first
 
 
 class RWKV7Mixer(nn.Module):
@@ -519,3 +576,72 @@ class RoutedRWKV7Mixer(RWKV7Mixer):
             **kwargs,
         )
         return out * route_mask, attentions, past_key_values, rwkv7_v_first
+
+
+class SlotRWKV7Mixer(RoutedRWKV7Mixer):
+    """RWKV-7 with explicit Raven-like routed recurrent memory slots.
+
+    This variant gives each head `num_slots` independent RWKV state matrices and
+    applies the top-k router inside the recurrent update. It is the closest fit
+    to Raven's slot-level memory semantics, but it cannot use the dense LT2 RWKV
+    recurrence kernel because the kernel has no slot dimension.
+    """
+
+    def _slot_weights(self, hidden_states: Tensor) -> Tensor:
+        B, T, _C = hidden_states.shape
+        logits = self.router(hidden_states).view(B, T, self.num_heads, self.num_slots)
+        if self.add_gumbel_noise and self.training:
+            logits = logits - torch.empty_like(logits).exponential_().log()
+
+        if self.router_score == "sigmoid":
+            scores = torch.sigmoid(logits)
+        else:
+            scores = torch.softmax(logits.float(), dim=-1).to(dtype=logits.dtype)
+
+        route_idx = scores.topk(self.topk, dim=-1).indices
+        route_weights = torch.gather(scores, dim=-1, index=route_idx)
+        if self.router_score == "sigmoid":
+            route_weights = route_weights / (route_weights.sum(dim=-1, keepdim=True) + 1e-9)
+        return torch.zeros_like(scores).scatter_(-1, route_idx, route_weights)
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        past_key_values=None,
+        use_cache: Optional[bool] = False,
+        output_attentions: Optional[bool] = False,
+        rwkv7_v_first: Optional[Tensor] = None,
+        reset_rwkv7_v_first: bool = False,
+        **_kwargs,
+    ):
+        if attention_mask is not None:
+            if attention_mask.dim() != 2:
+                raise ValueError("SlotRWKV7Mixer expects attention_mask with shape [batch_size, seq_len]")
+            mask = attention_mask[:, -hidden_states.shape[1] :].to(device=hidden_states.device, dtype=hidden_states.dtype)
+            hidden_states = hidden_states * mask.unsqueeze(-1)
+        else:
+            mask = None
+
+        if use_cache:
+            warnings.warn(
+                "SlotRWKV7Mixer does not maintain an incremental generation cache; falling back to full-prefix execution.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        slot_weights = self._slot_weights(hidden_states)
+        r, w, k, v, a, b, g, rwkv7_v_first = self.time_mix._project_torch(
+            hidden_states,
+            v_first=rwkv7_v_first,
+            reset_v_first=reset_rwkv7_v_first or rwkv7_v_first is None,
+        )
+        y = rwkv7_slot_recurrence_torch(r, w, k, v, a, b, slot_weights, self.head_size)
+        out = self.time_mix._finish_torch(y, r, k, v, g)
+
+        if mask is not None:
+            out = out * mask.unsqueeze(-1)
+            if rwkv7_v_first is not None:
+                rwkv7_v_first = rwkv7_v_first * mask.unsqueeze(-1)
+
+        return out, None, past_key_values, rwkv7_v_first

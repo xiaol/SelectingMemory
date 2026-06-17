@@ -17,7 +17,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from raven.layers.raven import RavenAttention
-from raven.layers.rwkv7 import RWKV7Mixer, RoutedRWKV7Mixer
+from raven.layers.rwkv7 import RWKV7Mixer, RoutedRWKV7Mixer, SlotRWKV7Mixer
 from raven.models.raven.configuration_raven import RavenConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
@@ -51,8 +51,12 @@ class RavenBlock(nn.Module):
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx
             )
-        elif config.sequence_mixer in {"rwkv7", "routed_rwkv7"}:
-            mixer_cls = RoutedRWKV7Mixer if config.sequence_mixer == "routed_rwkv7" else RWKV7Mixer
+        elif config.sequence_mixer in {"rwkv7", "routed_rwkv7", "slot_rwkv7"}:
+            mixer_cls = {
+                "rwkv7": RWKV7Mixer,
+                "routed_rwkv7": RoutedRWKV7Mixer,
+                "slot_rwkv7": SlotRWKV7Mixer,
+            }[config.sequence_mixer]
             self.attn = mixer_cls(
                 hidden_size=config.hidden_size,
                 num_hidden_layers=config.num_hidden_layers,

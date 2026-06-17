@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
         "--mixers",
         nargs="+",
         default=["raven", "rwkv7"],
-        choices=["raven", "rwkv7", "routed_rwkv7"],
+        choices=["raven", "rwkv7", "routed_rwkv7", "slot_rwkv7"],
     )
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"])

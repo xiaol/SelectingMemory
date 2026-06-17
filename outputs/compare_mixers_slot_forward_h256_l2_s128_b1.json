@@ -1,0 +1,81 @@
+{
+  "args": {
+    "mixers": [
+      "raven",
+      "rwkv7",
+      "routed_rwkv7",
+      "slot_rwkv7"
+    ],
+    "device": "cuda",
+    "dtype": "bf16",
+    "batch_size": 1,
+    "seq_len": 128,
+    "hidden_size": 256,
+    "num_layers": 2,
+    "num_heads": 4,
+    "num_slots": 32,
+    "topk": 8,
+    "vocab_size": 32000,
+    "warmup": 2,
+    "steps": 5,
+    "backward": false,
+    "seed": 1234,
+    "rwkv_backend": "cuda",
+    "rwkv_head_size": 64,
+    "rwkv_chunk_len": 16,
+    "routed_rwkv_route_floor": 0.1,
+    "lt2_wrapper_root": null,
+    "lt2_cuda_dir": null,
+    "json_out": "outputs/compare_mixers_slot_forward_h256_l2_s128_b1.json"
+  },
+  "results": [
+    {
+      "mixer": "raven",
+      "params_m": 18.157584,
+      "batch_size": 1,
+      "seq_len": 128,
+      "steps": 5,
+      "backward": false,
+      "seconds": 0.010786675000417745,
+      "tokens_per_second": 59332.46343059508,
+      "peak_memory_gb": 0.315052544,
+      "last_metric": -9.980887989513576e-05
+    },
+    {
+      "mixer": "rwkv7",
+      "params_m": 18.260224,
+      "batch_size": 1,
+      "seq_len": 128,
+      "steps": 5,
+      "backward": false,
+      "seconds": 0.006940537999980734,
+      "tokens_per_second": 92211.87176005327,
+      "peak_memory_gb": 0.047071232,
+      "last_metric": -0.0005739112384617329
+    },
+    {
+      "mixer": "routed_rwkv7",
+      "params_m": 18.32576,
+      "batch_size": 1,
+      "seq_len": 128,
+      "steps": 5,
+      "backward": false,
+      "seconds": 0.008377176000067266,
+      "tokens_per_second": 76398.06063461733,
+      "peak_memory_gb": 0.0473344,
+      "last_metric": -0.0008420745143666863
+    },
+    {
+      "mixer": "slot_rwkv7",
+      "params_m": 18.32576,
+      "batch_size": 1,
+      "seq_len": 128,
+      "steps": 5,
+      "backward": false,
+      "seconds": 0.13073262600028102,
+      "tokens_per_second": 4895.487986286027,
+      "peak_memory_gb": 0.05674496,
+      "last_metric": -0.0008420745143666863
+    }
+  ]
+}

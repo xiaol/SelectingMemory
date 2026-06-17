@@ -47,7 +47,7 @@ def _parse_args() -> argparse.Namespace:
         "--mixers",
         nargs="+",
         default=["raven", "rwkv7"],
-        choices=["raven", "rwkv7", "routed_rwkv7"],
+        choices=["raven", "rwkv7", "routed_rwkv7", "slot_rwkv7"],
     )
     parser.add_argument("--lt2-wrapper-root", type=Path, default=None)
     parser.add_argument("--lt2-cuda-dir", type=Path, default=None)
