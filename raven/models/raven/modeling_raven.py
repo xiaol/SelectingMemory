@@ -17,6 +17,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from raven.layers.raven import RavenAttention
+from raven.layers.rwkv7 import RWKV7Mixer
 from raven.models.raven.configuration_raven import RavenConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
@@ -49,6 +50,18 @@ class RavenBlock(nn.Module):
                 rope_theta=config.attn['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx
+            )
+        elif config.sequence_mixer == "rwkv7":
+            self.attn = RWKV7Mixer(
+                hidden_size=config.hidden_size,
+                num_hidden_layers=config.num_hidden_layers,
+                max_seq_len=config.max_position_embeddings,
+                layer_idx=layer_idx,
+                head_size=config.rwkv7_head_size,
+                backend=config.rwkv7_backend,
+                chunk_len=config.rwkv7_chunk_len,
+                enable_v_first_mix=config.rwkv7_enable_v_first_mix,
+                norm_eps=config.norm_eps,
             )
         else:
             self.attn = RavenAttention(
@@ -92,18 +105,32 @@ class RavenBlock(nn.Module):
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        rwkv7_v_first: Optional[torch.Tensor] = None,
+        reset_rwkv7_v_first: bool = False,
         **kwargs: Unpack[Dict]
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
         hidden_states = self.attn_norm(hidden_states)
-        hidden_states, attentions, past_key_values = self.attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            **kwargs
-        )
+        if getattr(self.attn, "accepts_rwkv7_state", False):
+            hidden_states, attentions, past_key_values, rwkv7_v_first = self.attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                rwkv7_v_first=rwkv7_v_first,
+                reset_rwkv7_v_first=reset_rwkv7_v_first,
+                **kwargs
+            )
+        else:
+            hidden_states, attentions, past_key_values = self.attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                **kwargs
+            )
         if self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
@@ -113,7 +140,7 @@ class RavenBlock(nn.Module):
         hidden_states = self.mlp(hidden_states, **kwargs)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, attentions, past_key_values)
+        outputs = (hidden_states, attentions, past_key_values, rwkv7_v_first)
 
         return outputs
 
@@ -233,27 +260,32 @@ class RavenModel(RavenPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
-        for layer in self.layers:
+        rwkv7_v_first = None
+        for layer_idx, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
+                hidden_states, attentions, past_key_values, rwkv7_v_first = self._gradient_checkpointing_func(
                     layer.__call__,
                     hidden_states,
                     attention_mask,
                     past_key_values,
                     use_cache,
                     output_attentions,
+                    rwkv7_v_first,
+                    layer_idx == 0,
                     **kwargs
                 )
             else:
-                hidden_states, attentions, past_key_values = layer(
+                hidden_states, attentions, past_key_values, rwkv7_v_first = layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    rwkv7_v_first=rwkv7_v_first,
+                    reset_rwkv7_v_first=layer_idx == 0,
                     **kwargs
                 )
 

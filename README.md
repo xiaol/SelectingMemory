@@ -207,6 +207,43 @@ config = RavenConfig(
 model = AutoModelForCausalLM.from_config(config).cuda()
 ```
 
+### RWKV-7 sequence mixer
+
+Raven can also replace the default routing-memory layer with the original RWKV-7 time mixer adapted from HRM-Text:
+
+```python
+config = RavenConfig(
+    hidden_size=1024,
+    num_hidden_layers=24,
+    sequence_mixer="rwkv7",
+    rwkv7_head_size=64,
+    rwkv7_backend="cuda",
+    rwkv7_chunk_len=16,
+    vocab_size=32000,
+)
+model = RavenForCausalLM(config)
+```
+
+This path preserves Raven's embedding, normalization, MLP, LM head, and Hugging Face model API, while swapping `RavenAttention` for an RWKV-7 mixer inside each non-attention block.
+
+To compare Raven vs. RWKV-7 with the same model shape:
+
+```sh
+PYTHONPATH=/home/xiaol/X/HRM-Text:$PYTHONPATH \
+LT2_RWKV7_CUDA_DIR=/home/xiaol/X/LT2_upstream/apps/LT2/cuda/rwkv7 \
+python examples/compare_mixers.py \
+  --device cuda \
+  --dtype bf16 \
+  --rwkv-backend cuda \
+  --hidden-size 512 \
+  --num-layers 4 \
+  --seq-len 512 \
+  --batch-size 2 \
+  --steps 10
+```
+
+Use `--backward` to compare training-step cost instead of inference-only forward cost. The LT2 CUDA path currently requires BF16, `rwkv7_head_size=64`, and `rwkv7_chunk_len=16`.
+
 ---
 
 ## Training
@@ -276,8 +313,5 @@ This repo builds on [fla-org/flash-linear-attention] and depends on it for hardw
 }
 
 ```
-
-
-
 
 

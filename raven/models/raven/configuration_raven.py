@@ -50,6 +50,11 @@ class RavenConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         use_l2warp: bool = False,
+        sequence_mixer: str = "raven",
+        rwkv7_head_size: int = 64,
+        rwkv7_backend: str = "cuda",
+        rwkv7_chunk_len: int = 16,
+        rwkv7_enable_v_first_mix: bool = True,
         vocab_size: int = 32000,
         **kwargs
     ):
@@ -87,7 +92,15 @@ class RavenConfig(PretrainedConfig):
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.use_l2warp = use_l2warp
+        self.sequence_mixer = sequence_mixer
+        self.rwkv7_head_size = rwkv7_head_size
+        self.rwkv7_backend = rwkv7_backend
+        self.rwkv7_chunk_len = rwkv7_chunk_len
+        self.rwkv7_enable_v_first_mix = rwkv7_enable_v_first_mix
         self.vocab_size = vocab_size
+
+        if sequence_mixer not in {"raven", "rwkv7"}:
+            raise ValueError("sequence_mixer must be 'raven' or 'rwkv7'")
 
         if attn is not None:
             if not isinstance(attn, Dict):

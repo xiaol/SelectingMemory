@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
 from raven.layers.raven import RavenAttention
+from raven.layers.rwkv7 import RWKV7Mixer
 
-__all__ = ['RavenAttention']
+__all__ = ['RavenAttention', 'RWKV7Mixer']
