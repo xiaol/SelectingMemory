@@ -11,6 +11,30 @@ It introduces a **routing memory mechanism** that selectively writes to a fixed 
 
 ---
 
+## SelectingMemory Update: Routed RWKV-7 Memory
+
+This fork adds RWKV-7 sequence mixers to Raven so the original Raven routing-memory mixer can be compared against RWKV variants inside the same `RavenForCausalLM` model API.
+
+Implemented in this repo:
+
+- `sequence_mixer="rwkv7"`: original dense RWKV-7 TimeMix adapted from HRM-Text, using the LT2 CUDA backend when available.
+- `sequence_mixer="routed_rwkv7"`: Raven-style top-k router gating dense RWKV channel groups.
+- `sequence_mixer="slot_rwkv7"`: explicit Raven-level routed RWKV memory slots with full `num_slots x D x D` per-head state.
+- `sequence_mixer="low_rank_slot_rwkv7"`: explicit routed RWKV slots with lower-cost `num_slots x rank x D` per-head state.
+- `low_rank_slot_rwkv7_backend="triton_fused"`: train-ready Triton forward plus reverse-scan backward for the low-rank slot RWKV path.
+- `examples/compare_mixers.py`, `examples/run_compare_matrix.py`, and `examples/compare_hrm_text_losses.py`: speed and held-out loss comparison scripts.
+
+Local HRM-Text held-out loss comparison on RTX 4090, trained from scratch on `/home/xiaol/X/hrm_text_subset_1B` for 500 steps with `hidden=256`, `layers=2`, `batch=4`, `seq=128`, `slots=64`, `topk=16`, `rank=8`:
+
+| mixer | params M | initial val | final val | best val | final train | tok/s | peak GB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `raven` | 35.39 | 11.1281 | 2.9195 | 2.9195 | 2.5000 | 49,627 | 0.448 |
+| `low_rank_slot_rwkv7` | 35.56 | 11.0938 | 2.6273 | 2.6273 | 1.9531 | 52,854 | 0.991 |
+
+In this local train-ready comparison, low-rank slot RWKV reaches lower validation loss and slightly higher throughput than Raven, while using more VRAM because the fused backward caches low-rank slot states. Full commands and implementation details are in the [RWKV-7 sequence mixers](#rwkv-7-sequence-mixers) section.
+
+---
+
 <div align="center">
 
 <a href="https://arshiaafzal.github.io/SSM_Story/assets/html/raven_recurrent_matrix_update.html">
